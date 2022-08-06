@@ -1,27 +1,32 @@
 import numpy as np
 import pickle
-from typing import Union, List
+from typing import Union, List, Tuple
 import matplotlib.pyplot as plt
 
 from .utilities import check_folder
 from .DOELib import Design, scaling
 
 class KSModel:
-    """
-    A kernel smoothing model using Gaussian kernels: 
-    Y = exp(-pi*l||Xi-Z||)Yi/exp(-pi*l||Xi-Z||), 
-    """
-
     # Kernels
     # norm2 function -> x.nrows
-    dist_norm_2 = lambda self,x,x1 : np.linalg.norm(np.matmul((x-x1),self.B),axis=1)
+    dist_norm_2 = lambda self,x,x1 : np.linalg.norm((x-x1) @ self.B,axis=1)
     # Gradient of kernel function (divide each column of (x-x1) by norm2(x-x1)-> [x.nrows * x.ncols]
-    dist_norm_2_grad = lambda self,x,x1 : np.matmul((x-x1),self.B**2)/(self.dist_norm_2(x,x1)[:,None]) 
+    dist_norm_2_grad = lambda self,x,x1 : ((x-x1) @ self.B**2)/(self.dist_norm_2(x,x1)[:,None]) 
     # Gaussian kernel function -> x.nrows
     kerf = lambda self,x : np.exp(-np.pi*x)
 
     def __init__(self, key: str = ''):
+        """
+        A kernel smoothing model using Gaussian kernels: 
+        Y = exp(-pi*l||Xi-Z||)Yi/exp(-pi*l||Xi-Z||), 
+
+        Parameters
+        ----------
+        key : str, optional
+            key to label model with, by default ''
+        """
         self.n_features = None
+        self.n_outputs = None
         self._X = None
         self._Y = None
         self._bandwidth = np.empty(0)
@@ -30,6 +35,8 @@ class KSModel:
         self.B = np.empty(0)
         self.data_available = False
         self.key = key
+        self.predict_available = False
+        self.Z = None
 
     @property
     def X(self) -> np.ndarray:
@@ -264,6 +271,8 @@ class KSModel:
             # [X.ncols * Y.ncols]
             self.grad_F[:,:,k] = ( (S_phi * S_grad_phi_y) - (S_phi_y.T * S_grad_phi) ) / (S_phi**2) # an X x P Jacobian
 
+        self.predict_available = True
+        self.Z = Z
         return self.F, self.grad_F
 
     def R2(self,X:np.ndarray, Y:np.ndarray) -> float:
@@ -341,12 +350,66 @@ class KSModel:
         self.bandwidth = bandwidth
         self.B=np.diag(1./self._bandwidth) # bandwidth matrix
         self.data_available = True
+        self.n_outputs = self.Y.shape[1]
+
+    def cross_section(self, xi: List[int], yi: int, nominal: Union[float,np.ndarray] = None, n_levels: int = 100) \
+        -> Tuple[np.ndarray,np.ndarray,np.ndarray,np.ndarray,np.ndarray,np.ndarray]:
+        """
+        Computes a cross-section of the surrogate model
+
+        Parameters
+        ----------
+        xi : list[int]
+            index of the margin node values to be viewed on the plot
+        yi : int
+            index of the performance parameter to be viewed on the plot
+        nominal : Union[float,np.ndarray], optional
+            default value of features outside viewing scope, if None then default is the mid point of the model bounds
+            by default None
+        n_levels : int, optional
+            resolution of the plot (how many full factorial levels in each direction are sampled), 
+            by default 100
+        
+        Returns
+        -------
+        Tuple[np.ndarray,np.ndarray,np.ndarray,np.ndarray,np.ndarray,np.ndarray]
+            plot data as a tuple (x,y,z,plot_grid,estimate) for further plotting
+        """
+
+        if nominal is not None:
+            if isinstance(nominal, (int, float)):
+                nominal = nominal * np.ones(self.n_features)
+            else:
+                assert nominal.ndim == 1, 'expected %i dimensions, got %i dimensions' %(1,nominal.ndim)
+                assert len(nominal) == self.n_features, 'expected %i parameters, got %i parameters' %(self.n_features,len(nominal))
+        else:
+            nominal = ((self.ub - self.lb)/2)  + self.lb
+
+        sampling_vector = np.ones(self.n_features)
+        # only sample the selected variables while holding the other variables at their nominal values
+        sampling_vector[xi] = n_levels
+
+        lb_x, ub_x = np.empty(0), np.empty(0)
+        for i in range(self.n_features):
+            lb_x = np.append(lb_x, nominal[i])
+            ub_x = np.append(ub_x, nominal[i] + 1e-3)
+        lb_x[xi] = self.lb[xi]
+        ub_x[xi] = self.ub[xi]
+
+        plot_grid = Design(lb_x, ub_x, sampling_vector, 'fullfact')
+        f,grad_f = self.predict(plot_grid.unscale())
+
+        x = plot_grid.unscale()[:, xi[0]].reshape((n_levels, n_levels))
+        y = plot_grid.unscale()[:, xi[1]].reshape((n_levels, n_levels))
+        z = f[:, yi].reshape((n_levels, n_levels))
+
+        return x,y,z,plot_grid,f,grad_f
 
     def view(self, xi: List[int], yi: int, nominal: Union[float,np.ndarray] = None, label_x1: str = None, label_x2: str = None,
-                    label_y: str = None, n_levels: int = 100, folder: str = '', file: str = None,
-                    img_format: str = 'pdf'):
+        label_y: str = None, n_levels: int = 100, folder: str = '', file: str = None,
+        img_format: str = 'pdf', handles: bool = False, show_training: bool = False) -> Tuple[plt.Figure,plt.Axes]:
         """
-        Shows the estimated performance 
+        Shows a cross-section of the surrogate model
 
         Parameters
         ----------
@@ -375,53 +438,39 @@ class KSModel:
             name of image file, if not provide then an image is not saved, by default None
         img_format : str, optional
             format of the image to be stored, by default 'pdf'
+        handles : str, optional
+            if True return figure and axis handles and do not .show() figure, 
+            by default False
+        show_training : bool, optional
+            whether to show training data, by default False
+
+        Returns
+        -------
+        Tuple[plt.Figure,plt.Axes]
+            the figure and axis handles
         """
-        if nominal is not None:
-            if isinstance(nominal, (int, float)):
-                nominal = nominal * np.ones(self.n_features)
-            else:
-                assert nominal.ndim == 1, 'expected %i dimensions, got %i dimensions' %(1,nominal.ndim)
-                assert len(nominal) == self.n_features, 'expected %i parameters, got %i parameters' %(self.n_features,len(nominal))
-        else:
-            nominal = ((self.ub - self.lb)/2)  + self.lb
+
+        x,y,z,_,f,grad_f = self.cross_section(xi,yi,nominal,n_levels)
 
         # Plot the result in 2D
         fig = plt.figure(figsize=(10, 8))
         ax = fig.add_subplot()
 
-        sampling_vector = np.ones(self.n_features)
-        # only sample the selected variables while holding the other variables at their nominal values
-        sampling_vector[xi] = n_levels
-
-        lb_x, ub_x = np.empty(0), np.empty(0)
-        for i in range(self.n_features):
-            lb_x = np.append(lb_x, nominal[i])
-            ub_x = np.append(ub_x, nominal[i] + 1e-3)
-        lb_x[xi] = self.lb[xi]
-        ub_x[xi] = self.ub[xi]
-
-        plot_grid = Design(lb_x, ub_x, sampling_vector, 'fullfact')
-        estimate,_ = self.predict(plot_grid.unscale())
-
-        x = plot_grid.unscale()[:, xi[0]].reshape((n_levels, n_levels))
-        y = plot_grid.unscale()[:, xi[1]].reshape((n_levels, n_levels))
-        z = estimate[:, yi].reshape((n_levels, n_levels))
-
         label_x1 = 'x%i' %(xi[0]+1) if label_x1 is None else label_x1
         label_x2 = 'x%i' %(xi[1]+1) if label_x2 is None else label_x2
         label_y = 'f' if label_y is None else label_y
 
-        ax.contourf(x, y, z, cmap=plt.cm.jet, )
-        # ax.plot(self.xt[:50,xi[0]],self.xt[:50,xi[1]],'.k', markersize = 10) # plot DOE points for surrogate (first 50 only)
-        ax.plot(self.X[:,xi[0]],self.X[:,xi[1]],'.k') # plot DOE points for surrogate
+        ax.contourf(x, y, z, alpha=0.5)
+        if show_training:
+            ax.plot(self.X[:,xi[0]],self.X[:,xi[1]],'.k') # plot DOE points for surrogate
 
         ax.set_xlabel(label_x1)
         ax.set_ylabel(label_x2)
 
-        cbar = plt.cm.ScalarMappable(cmap=plt.cm.jet)
+        cbar = plt.cm.ScalarMappable()
         cbar.set_array(z)
 
-        boundaries = np.linspace(np.min(estimate[:, yi]), np.max(estimate[:, yi]), 51)
+        boundaries = np.linspace(np.min(f[:, yi]), np.max(f[:, yi]), 51)
         cbar_h = fig.colorbar(cbar, boundaries=boundaries)
         cbar_h.set_label(label_y, rotation=90, labelpad=3)
 
@@ -431,7 +480,10 @@ class KSModel:
             self.fig.savefig('images/%s/%s.%s' % (folder, file, img_format),
                              format=img_format, dpi=200, bbox_inches='tight')
 
-        plt.show()
+        if handles:
+            return fig, ax
+        else:
+            plt.show()
 
     def save(self, filename: str = 'KS'):
         """
@@ -451,6 +503,7 @@ class KSModel:
             pickle.dump(self.bandwidth,fid)
             pickle.dump(self.B,fid)
             pickle.dump(self.data_available,fid)
+            pickle.dump(self.n_outputs,fid)
 
     def load(self, filename: str = 'KS'):
         """
@@ -470,3 +523,4 @@ class KSModel:
             self.bandwidth = pickle.load(fid)
             self.B = pickle.load(fid)
             self.data_available = pickle.load(fid)
+            self.n_outputs = pickle.load(fid)
