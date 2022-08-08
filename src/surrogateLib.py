@@ -11,7 +11,7 @@ class KSModel:
     # norm2 function -> x.nrows
     dist_norm_2 = lambda self,x,x1 : np.linalg.norm((x-x1) @ self.B,axis=1)
     # Gradient of kernel function (divide each column of (x-x1) by norm2(x-x1)-> [x.nrows * x.ncols]
-    dist_norm_2_grad = lambda self,x,x1 : ((x-x1) @ self.B**2)/(self.dist_norm_2(x,x1)[:,None]) 
+    dist_norm_2_grad = lambda self,x,x1 : ((x-x1) @ (self.B**2))/(self.dist_norm_2(x,x1)[:,None]) 
     # Gaussian kernel function -> x.nrows
     kerf = lambda self,x : np.exp(-np.pi*x)
 
@@ -212,6 +212,7 @@ class KSModel:
         assert Z.shape[1] == self.X.shape[1], \
             'expected %i dimensions, got %i dimensions' %(self.X.shape[1],Z.shape[1])
 
+        Z = scaling(Z,self.lb,self.ub,1)
         # # [X.nrows * Z.nrows * X.cols]
         # diff = np.tile(Z,(5,1,1)) - self.X[:,:,None]
         # # [Z.nrows * X.cols]
@@ -226,17 +227,17 @@ class KSModel:
         self.F=np.zeros((Z.shape[0],self.Y.shape[1]))
 
         # [X.ncols * Y.ncols * Z.nrows]
-        self.grad_F = np.zeros((self.Y.shape[1], self.X.shape[1], Z.shape[0]))
+        self.grad_F = np.zeros((self.Y.shape[1], self._X.shape[1], Z.shape[0]))
 
         # Loop through each regression point
         for k in range(Z.shape[0]):
 
             # [X.nrows * Z.ncols]
-            x_p = np.tile(Z[k,:],(self.X.shape[0],1))
+            x_p = np.tile(Z[k,:],(self._X.shape[0],1))
 
             # scaled deference from regression point
             # X.nrows
-            xx=self.dist_norm_2(x_p,self.X)
+            xx=self.dist_norm_2(x_p,self._X)
             
             # select neighbors using exp(-pi*norm2(x-xi))<5e-6
             # X.nrows
@@ -257,7 +258,7 @@ class KSModel:
 
             #############################################
             # [X.nrows * X.ncols]
-            xx_grad = self.dist_norm_2_grad(x_p,self.X)
+            xx_grad = self.dist_norm_2_grad(x_p,self._X)
 
             # [X.nrows * X.ncols]
             z_grad = -np.pi*xx_grad[idx,:] * z[:,None]
