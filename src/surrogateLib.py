@@ -384,8 +384,9 @@ class KSModel:
                 assert nominal.ndim == 1, 'expected %i dimensions, got %i dimensions' %(1,nominal.ndim)
                 assert len(nominal) == self.n_features, 'expected %i parameters, got %i parameters' %(self.n_features,len(nominal))
         else:
-            nominal = ((self.ub - self.lb)/2)  + self.lb
-
+            nominal = 0.5
+        
+        nominal = scaling(nominal,self.lb,self.ub,2)
         sampling_vector = np.ones(self.n_features)
         # only sample the selected variables while holding the other variables at their nominal values
         sampling_vector[xi] = n_levels
